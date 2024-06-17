@@ -68,10 +68,12 @@ def obter_dados_firebird():
                'PIX_IN',
                c.valor,
                c.taxa_total,
-               c.valor_sem_taxa AS VALOR_MENOS_TAXA
+               c.valor_sem_taxa AS VALOR_MENOS_TAXA,
+               ws.SALDO as saldo_atual
         FROM cobranca c
         INNER JOIN empresa e ON c.fk_empresa = e.codigo
-
+        LEFT JOIN 
+            wl_saldo ws ON c.fk_empresa = ws.codigo
         UNION ALL
 
         SELECT DAY(s.data_solicitacao) AS DIA, 
@@ -83,13 +85,15 @@ def obter_dados_firebird():
                'PIX_OUT',
                s.valor_solicitado,
                s.taxa_total,
-               s.valor_sem_taxa AS VALOR_MENOS_TAXA
+               s.valor_sem_taxa AS VALOR_MENOS_TAXA,
+               ws.SALDO as saldo_atual
         FROM saque s
         INNER JOIN empresa e ON s.fk_empresa = e.codigo
+        LEFT JOIN 
+         wl_saldo ws ON s.fk_empresa = ws.codigo;
         """
 
     df = pd.read_sql(query, conexao)
-    
     conexao.close()
     return df
 
@@ -102,6 +106,7 @@ def criacao():
     )
 
     query2 = """
+    
         SELECT DAY(c.data_dia) AS DIA_CRIACAO, 
             MONTH(c.data_dia) AS MES_CRIACAO, 
             YEAR(c.data_dia) AS ANO_CRIACAO
@@ -118,14 +123,12 @@ def criacao():
 
         """
     df2 = pd.read_sql(query2, conexao)
-    
     conexao.close()
     return df2
 
 df = obter_dados_firebird()
 df_cru = df
 df2 = criacao()
-
 
 def convert_to_text(month):
     match month:
@@ -263,17 +266,14 @@ login_layout = html.Div(
     ], style=center_style
 )
 
+
 tab_graficos_fiscais = dbc.Tab(
     label="Extrato", tab_id="tab-graficos-fiscais", children=[
-dbc.Container(fluid=True, children=[
-    dbc.Row([
-        dbc.Col([
-                dbc.CardBody([
-                    dbc.Row(
-                        dbc.Col(
-                            html.Legend('EXTRATO DIÁRIO')
-                            )
-                        ),
+        dbc.Container(fluid=True, children=[
+            dbc.Row([
+                dbc.Col([
+                    dbc.CardBody([
+                        dbc.Row(dbc.Col(html.Legend('EXTRATO DIÁRIO'))),
                         dbc.Col([
                             dbc.Card([
                                 dbc.CardBody([
@@ -286,44 +286,56 @@ dbc.Container(fluid=True, children=[
                                                 end_date=end_date_default,
                                                 display_format='DD/MM/YYYY'
                                             ),
-                                             dcc.Dropdown(
+                                            dcc.Dropdown(
                                                 id='empresa-dropdown',
                                                 style={'backgroundColor': '#333333', 'marginTop': '20px', 'width': '286px'},
-                                                placeholder='Selecione uma empresa'),
-                                        ], sm=6, lg=3), 
+                                                placeholder='Selecione uma empresa'
+                                            ),
+                                        ], sm=6, lg=3),
                                         dbc.Col([
                                             html.Div(
                                                 id='table-container-in-parent',
                                                 style={'display': 'flex', 'justify-content': 'center', 'margin-top': '7px'},
                                                 children=[
-                                                    html.Div(id='table-container-in'),    
+                                                    html.Div(id='table-container-in'),
                                                 ]
                                             )
                                         ], sm=6, lg=6),
                                     ])
                                 ])
-                            ], style=tab_card)
+                            ], style={'marginTop': '20px'})
                         ], sm=12, lg=12),
-                ])
-        ], sm=12, lg=12),
-    ], className='g-2 my-auto', style={'margin-top': '7px'}),
-        dcc.Interval(
-        id='intervalo-component',
-        interval=5 * 60 * 1000,
-        n_intervals=0
-    )
-])], style={'height': '100vh'})
+                    ])
+                ], sm=12, lg=12),
+            ], className='g-2 my-auto', style={'margin-top': '7px'}),
+            dcc.Interval(
+                id='intervalo-component',
+                interval=5 * 60 * 1000,
+                n_intervals=0
+            ),
+            dcc.Store(id='data-loaded', data=False)  # Armazenar o estado de carregamento dos dados
+        ])
+    ], style={'height': '100vh'}
+)
+
 
 
 main_layout = dbc.Container(fluid=True, children=[
+        dcc.Store(id='loading-state', data=True),  # Store to keep track of initial loading state
+    dcc.Loading(
+        id='loading-indicator',
+        type='default',
+        children=html.Div(id="app-content", children=[
     dbc.Tabs(id="tabs", active_tab="tab-graficos-vendas", children=[
         dbc.Tab(label="Gráficos Vendas", tab_id="tab-graficos-vendas"),
         tab_graficos_fiscais,
     ]),
     html.Div(id="graphs-container")
+        ])
+    )
 ])
-
     
+
 tab_graficos_vendas = dbc.Tab(
     label="Gráficos Vendas", id="tab-graficos-vendas", children=[
     dbc.Container(fluid=True, children=[
@@ -545,7 +557,7 @@ tab_graficos_vendas = dbc.Tab(
 
         dcc.Interval(
         id='interval-component',
-        interval=5 * 60 * 1000,  
+        interval=1 * 60 * 60 * 1000,
         n_intervals=0
     )
 ])], style={'height': '100vh'})
@@ -557,62 +569,61 @@ tab_graficos_vendas = dbc.Tab(
 )
 def update_graphs_content(active_tab):
     if active_tab == 'tab-graficos-vendas':
-        return tab_graficos_vendas.children
+        return tab_graficos_vendas
     elif active_tab == 'tab-graficos-fiscais':
         return None
-    
+
+
 def cosultaextratoin():
     conn = mysql.connector.connect(
             host='localhost',
             user='ideia',
             password='Ideia@2017',
             database='modapay'
-
     )
 
     sql_in = """
-        WITH
+        WITH 
             cobranca_cte AS (
-                SELECT
+                SELECT 
                     e.fantasia,
-                    DATE(c.data_pagamento) AS data_pagamento,
+                    DATE(c.data_pagamento) AS data_dia,
                     SUM(c.valor) AS valor_in,
                     COUNT(*) AS qtd_in,
                     SUM(c.taxa_total) AS taxa_in,
                     SUM(c.valor_sem_taxa) AS menos_taxa_in,
-                    SUM(c.valor) / COUNT(*) AS ticket_medio_in,
-                    MAX(c.saldo_atual) AS saldo_acumulado -- Usar o nome correto da coluna de saldo, assumindo saldo_atual
-                FROM
+                    SUM(c.valor) / COUNT(*) AS ticket_medio_in
+                FROM 
                     cobranca c
-                INNER JOIN
+                INNER JOIN 
                     empresa e ON c.fk_empresa = e.codigo
-                WHERE
-                    c.status IN ('CONCLUIDO', 'CONCLUIDA')
-                GROUP BY
+                WHERE 
+                    c.status IN ('CONCLUIDO', 'CONCLUIDA') 
+                GROUP BY 
                     e.fantasia, DATE(c.data_pagamento)
             ),
             saque_cte AS (
-                SELECT
-                    e.fantasia,
-                    s.data_solicitacao AS data_pagamento,
-                    SUM(s.valor_solicitado) AS valor_out,
-                    COUNT(*) AS qtd_out,
-                    SUM(s.taxa_total) AS taxa_out,
+                SELECT 
+                    e.fantasia, 
+                    s.data_solicitacao AS data_dia, 
+                    SUM(s.valor_solicitado) AS valor_out, 
+                    COUNT(*) AS qtd_out, 
+                    SUM(s.taxa_total) AS taxa_out, 
                     SUM(s.valor_sem_taxa) AS menos_taxa_out,
                     SUM(s.valor_solicitado) / COUNT(*) AS ticket_medio_out
-                FROM
+                FROM 
                     saque s
-                INNER JOIN
+                INNER JOIN 
                     empresa e ON s.fk_empresa = e.codigo
-                WHERE
-                    s.status IN ('executed', 'processing')
-                GROUP BY
+                WHERE 
+                    s.status IN ('executed', 'processing') 
+                GROUP BY 
                     e.fantasia, s.data_solicitacao
             ),
             combined_cte AS (
-                SELECT
+                SELECT 
                     fantasia,
-                    data_pagamento,
+                    data_dia,
                     SUM(valor_in) AS valor_in,
                     SUM(qtd_in) AS qtd_in,
                     SUM(taxa_in) AS taxa_in,
@@ -621,13 +632,18 @@ def cosultaextratoin():
                     SUM(qtd_out) AS qtd_out,
                     SUM(taxa_out) AS taxa_out,
                     SUM(menos_taxa_out) AS menos_taxa_out,
-                    AVG(ticket_medio_in) AS ticket_medio_in,
-                    AVG(ticket_medio_out) AS ticket_medio_out,
-                    MAX(saldo_acumulado) AS saldo_acumulado -- Corrigir para incluir o saldo acumulado
+                    CASE 
+                        WHEN SUM(qtd_in) > 0 THEN SUM(valor_in) / SUM(qtd_in) 
+                        ELSE 0 
+                    END AS ticket_medio_in,
+                    CASE 
+                        WHEN SUM(qtd_out) > 0 THEN SUM(valor_out) / SUM(qtd_out) 
+                        ELSE 0 
+                    END AS ticket_medio_out
                 FROM (
-                    SELECT
+                    SELECT 
                         fantasia,
-                        data_pagamento,
+                        data_dia,
                         valor_in,
                         qtd_in,
                         taxa_in,
@@ -637,16 +653,15 @@ def cosultaextratoin():
                         0 AS taxa_out,
                         0 AS menos_taxa_out,
                         ticket_medio_in,
-                        0 AS ticket_medio_out,
-                        saldo_acumulado
-                    FROM
+                        0 AS ticket_medio_out
+                    FROM 
                         cobranca_cte
 
                     UNION ALL
 
-                    SELECT
+                    SELECT 
                         fantasia,
-                        data_pagamento,
+                        data_dia,
                         0 AS valor_in,
                         0 AS qtd_in,
                         0 AS taxa_in,
@@ -656,40 +671,45 @@ def cosultaextratoin():
                         taxa_out,
                         menos_taxa_out,
                         0 AS ticket_medio_in,
-                        ticket_medio_out,
-                        NULL AS saldo_acumulado -- Manter a compatibilidade de colunas na união
-                    FROM
+                        ticket_medio_out
+                    FROM 
                         saque_cte
                 ) AS subquery
-                GROUP BY
-                    fantasia, data_pagamento
+                GROUP BY 
+                    fantasia, data_dia
+            ),
+            saldo_cte AS (
+                SELECT 
+                    fantasia,
+                    data_dia,
+                    valor_in,
+                    qtd_in,
+                    taxa_in,
+                    menos_taxa_in,
+                    valor_out,
+                    qtd_out,
+                    taxa_out,
+                    menos_taxa_out,
+                    ticket_medio_in,
+                    ticket_medio_out,
+                    SUM(menos_taxa_in - menos_taxa_out) OVER (PARTITION BY fantasia ORDER BY data_dia) AS saldo_acumulado
+                FROM
+                    combined_cte
             )
-        SELECT
-            fantasia,
-            data_pagamento,
-            valor_in,
-            qtd_in,
-            taxa_in,
-            menos_taxa_in,
-            valor_out,
-            qtd_out,
-            taxa_out,
-            menos_taxa_out,
-            ticket_medio_in,
-            ticket_medio_out,
-            saldo_acumulado
-        FROM
-            combined_cte
-        ORDER BY
-            fantasia ASC, data_pagamento ASC;
+        SELECT 
+            *
+        FROM 
+            saldo_cte
+        ORDER BY 
+            fantasia ASC, data_dia ASC;
 
     """
 
     df_extrato_in = pd.read_sql(sql_in, conn)
 
     conn.close()
-
     return df_extrato_in
+
 
 
 @app.callback(
@@ -701,12 +721,14 @@ def recarregar_dados(n_intervals):
     with lock:
         try:
             df = obter_dados_firebird()
+            df2 = criacao()
             df_extrato_in = cosultaextratoin()
         except Exception as e:
-            print(f"Erro ao obter dados do Firebird: {e}")
+            print(f"Erro recarregar_dados: {e}")
     return None
 
 df = obter_dados_firebird()
+df_extrato_in = cosultaextratoin()
 
 @app.callback(
     Output("radio-pix", "options"),
@@ -729,6 +751,116 @@ def update_radio_status_pix(n_intervals):
     options.append({'label': 'TODOS', 'value': 'Todos'}) 
     default_value = ['Todos']
     return options, default_value
+
+
+@app.callback(
+    [Output('table-container-in', 'children'),
+     Output('empresa-dropdown', 'options'),
+     Output('empresa-dropdown', 'value')],
+    [Input(ThemeSwitchAIO.ids.switch("theme"), "value"),
+     Input('interval-component', 'n_intervals'),
+     Input('date-range', 'start_date'),
+     Input('date-range', 'end_date'),
+     Input('empresa-dropdown', 'value')]  # Adicione esta entrada para capturar o valor selecionado do dropdown
+)
+def update_table(toggle, n_intervals, start_date, end_date, selected_empresa):  # Atualize a assinatura da função
+    try:
+        template = template_theme1 if toggle else template_theme2
+        
+        df_extrato_in = cosultaextratoin()
+        
+        df_extrato_in = df_extrato_in.rename(columns={
+            'fantasia': 'Empresa',
+            'data_dia': 'Data',
+            'valor_in': 'Transações Recebidas Cash-In',
+            'qtd_in': 'Qtd de Transações Cash-In',
+            'taxa_in': 'Taxa Total Cash-In',
+            'menos_taxa_in': 'Total Menos Taxa Cash-In',
+            'ticket_medio_in': 'Ticket Médio Cash-In',
+            'valor_out': 'Transações Recebidas Cash-Out',
+            'qtd_out': 'Qtd de Transações Cash-Out',
+            'taxa_out': 'Taxa Total Cash-Out',
+            'menos_taxa_out': 'Total Mais Taxa Cash-Out',
+            'ticket_medio_out': 'Ticket Médio Cash-Out',
+            'saldo_acumulado': 'Saldo Acumulado'
+        })
+        
+        df_extrato_in = df_extrato_in[['Empresa', 'Data', 'Transações Recebidas Cash-In', 'Qtd de Transações Cash-In', 'Taxa Total Cash-In', 'Total Menos Taxa Cash-In', 'Ticket Médio Cash-In', 'Saldo Acumulado', 'Transações Recebidas Cash-Out', 'Qtd de Transações Cash-Out', 'Taxa Total Cash-Out', 'Total Mais Taxa Cash-Out', 'Ticket Médio Cash-Out']]
+
+        dropdown_options = [{'label': empresa, 'value': empresa} for empresa in df_extrato_in['Empresa'].unique()]
+
+        df_extrato_in['Data'] = pd.to_datetime(df_extrato_in['Data'])
+        mask_in = (df_extrato_in['Data'] >= pd.to_datetime(start_date)) & (df_extrato_in['Data'] <= pd.to_datetime(end_date))
+        df_extrato_in = df_extrato_in.loc[mask_in].sort_values('Data').copy()
+
+
+        df_extrato_in = df_extrato_in.sort_values(by='Data', ascending=False)
+
+        df_extrato_in = df_extrato_in.fillna(0)
+        
+        df_extrato_in['Data'] = df_extrato_in['Data'].dt.strftime('%d/%m/%Y')
+        
+        # Aplicar filtro pelo valor selecionado no dropdown, se houver
+        if selected_empresa:
+            df_extrato_in = df_extrato_in[df_extrato_in['Empresa'] == selected_empresa]
+            df_extrato_in = df_extrato_in.groupby('Data').sum().reset_index()
+            df_extrato_in = df_extrato_in.sort_values(by='Data', ascending=False)
+
+
+        data_combined = []
+        for idx, row in df_extrato_in.iterrows():
+            data_combined.extend([
+                {'Descrição': 'Empresa:', 'Valor': row['Empresa']},
+                {'Descrição': 'Cash-In:', 'Valor': row['Data']},
+                {'Descrição': 'Recebido Cash-In', 'Valor': '{:,.2f}'.format(row['Transações Recebidas Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Qtd. Cash-In', 'Valor': '{:,.0f}'.format(row['Qtd de Transações Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Taxa Cash-In', 'Valor': '{:,.2f}'.format(row['Taxa Total Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Menos a Taxa Cash-In', 'Valor': '{:,.2f}'.format(row['Total Menos Taxa Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Ticket Médio Cash-In', 'Valor': '{:,.2f}'.format(row['Ticket Médio Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Cash-Out:', 'Valor': ''},
+                {'Descrição': 'Pago Cash-Out', 'Valor': '{:,.2f}'.format(row['Transações Recebidas Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Qtd. Cash-Out', 'Valor': '{:,.0f}'.format(row['Qtd de Transações Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Taxa Cash-Out', 'Valor': '{:,.2f}'.format(row['Taxa Total Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Mais a Taxa Cash-Out', 'Valor': '{:,.2f}'.format(row['Total Mais Taxa Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Ticket Médio Cash-Out', 'Valor': '{:,.2f}'.format(row['Ticket Médio Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
+                {'Descrição': 'Saldo Acumulado', 'Valor': '{:,.2f}'.format(row['Saldo Acumulado']).replace(',', '|').replace('.', ',').replace('|', '.'), 'id': 'saldo-acumulado'},
+                {'Descrição': '--------------------', 'Valor': '----------'}
+            ])
+
+        table_combined = dash_table.DataTable(
+            id='table-combined',
+            columns=[{"name": i, "id": i} for i in ['Descrição', 'Valor']],
+            data=data_combined,
+            style_table={'overflowX': 'scroll', 'width': '100%', 'margin': 'auto', 'border':'1px solid gray'},
+            style_cell={'textAlign': 'left', 'padding': '5px', 'whiteSpace': 'normal', 'height': 'auto', 'border-top': 'none', 'border-right': 'none'},
+            style_header={'fontWeight': 'bold', 'backgroundColor': 'white', 'color': 'black', 'text-align': 'center', 'border-bottom':'1px solid gray', 'margin-top':'50px'},
+            style_data={'whiteSpace': 'normal', 'height': 'auto', 'color': 'black', 'backgroundColor': 'white'},
+            export_format='csv',
+            style_data_conditional=[
+            {
+                'if': {'column_id': 'Valor'},
+                'textAlign': 'right',
+            },
+            {
+
+                'if': {'column_id': 'Valor', 'filter_query': '{id} eq "saldo-acumulado"'},
+                'color': '#1cb49c',
+                'fontWeight': 'bold'
+            },
+            {
+                'if': {'column_id': 'Descrição', 'filter_query': '{id} eq "saldo-acumulado"'},
+                'color': '#1cb49c',
+                'fontWeight': 'bold'
+            }
+
+        ]
+        )
+
+        return table_combined, dropdown_options, selected_empresa  # Retorne selected_empresa como valor do dropdown
+
+    except Exception as e:
+        print(f"Erro ao obter dados da tabela: {e}")
+        return html.Div(f"Erro ao carregar os dados da tabela: {e}")
 
 @app.callback(
     Output('graph1', 'figure'),
@@ -912,7 +1044,6 @@ def update_graph5(month, year, team, pix_type, status_list, status_ativo, toggle
 
 
 
-
 @app.callback(
     Output('graph6', 'figure'),
     [Input('radio-team', 'value'),
@@ -928,21 +1059,18 @@ def update_graph6(team, status_list, toggle, n_intervals):
             mask_team = team_filter(team)
             status_incluidos = ['CONCLUIDO', 'CONCLUIDA', 'processing', 'executed']
             mask_status = df['status'].isin(status_incluidos)
-            
 
-            df_filtered = df.loc[ mask_team & mask_status ]
-
+            df_filtered = df.loc[mask_team & mask_status]
             df_6 = df_filtered.groupby(['Fantasia', 'PIX_IN'])['VALOR_MENOS_TAXA'].sum().unstack(fill_value=0)
             df_pix_in = df_filtered[df_filtered['PIX_IN'] == 'PIX_IN']['VALOR_MENOS_TAXA'].sum()
             df_pix_out = df_filtered[df_filtered['PIX_IN'] == 'PIX_OUT']['VALOR_MENOS_TAXA'].sum()
             df_6['saldo_total'] = df_pix_in - df_pix_out
-            df_6 = df_6.sort_values(by='saldo_total', ascending=False)
-            if not df_6.empty:
-                total = df_6['saldo_total'].sum()
-                total_saldo = "{:,.2f}".format(total).replace('.', ',').replace(',', '.', 1)
-            else:
-                total_saldo = 0.0
             
+            df_6 = df_filtered.drop_duplicates(subset=['Fantasia'])[['Fantasia', 'saldo_atual']]
+            df_6.columns = ['Fantasia', 'saldo']
+            total = df_6['saldo'].sum()
+            total_saldo = "{:,.2f}".format(total).replace(',', 'v').replace('.', ',').replace('v', '.')
+
             fig6 = go.Figure()
             if toggle:
                 fig6.add_trace(go.Indicator(
@@ -961,10 +1089,12 @@ def update_graph6(team, status_list, toggle, n_intervals):
             fig6.update_layout(main_config, height=213, template=template)
             fig6.update_layout({"margin": {"l": 0, "r": 0, "t": 150, "b": 0}})
 
-
         except Exception as e:
             print(f"Erro ao atualizar gráficos 6: {e}")
+            fig6 = go.Figure()  # Defina fig6 mesmo em caso de erro
     return fig6
+
+
 
 
 @app.callback(
@@ -1020,6 +1150,7 @@ def update_graph8( year, team, pix_type, status_list, status_ativo, toggle, n_in
             mask_status = df['status'].isin(status_incluidos)
 
             df_filtered = df.loc[mask_year & mask_team & mask_pix & mask_status & mask_ativo]
+
 
             #Grafico 8
             df_8 = df_filtered.groupby('PIX_IN')['valor'].sum().reset_index()
@@ -1272,7 +1403,6 @@ def update_graph13(month_criacao, year_criacao, team, pix_type, status_list, sta
 
             df_13 = df_filtered2
             transacoes_todos = df_13['valor'].count()
-            print(transacoes_todos)
             transacoes_formatadas = "{:,.0f}".format(transacoes_todos).replace('.', ',').replace(',', '.', 1)
             fig13 = go.Figure()
             total = df_13['valor'].sum()
@@ -1510,7 +1640,6 @@ def update_radio_buttons(n_intervals, selected_year, selected_status):
     return options_year, selected_year, options_month, default_month, options_team, 0
 
 
-
 login_data = {
     'admin': 'admin',
     'camilo': 'moda@1010',
@@ -1532,117 +1661,6 @@ def check_login(n_clicks, username, password):
             return dcc.Location(pathname='/home', id='main_layout_redirect')
         else:
             return html.Div('Credenciais inválidas. Tente novamente.', style={'color': 'red'})
-
-
-@app.callback(
-    [Output('table-container-in', 'children'),
-     Output('empresa-dropdown', 'options'),
-     Output('empresa-dropdown', 'value')],
-    [Input(ThemeSwitchAIO.ids.switch("theme"), "value"),
-     Input('interval-component', 'n_intervals'),
-     Input('date-range', 'start_date'),
-     Input('date-range', 'end_date'),
-     Input('empresa-dropdown', 'value')]  # Adicione esta entrada para capturar o valor selecionado do dropdown
-)
-def update_table(toggle, n_intervals, start_date, end_date, selected_empresa):  # Atualize a assinatura da função
-    try:
-        template = template_theme1 if toggle else template_theme2
-        
-        df_extrato_in = cosultaextratoin()
-        
-        df_extrato_in = df_extrato_in.rename(columns={
-            'fantasia': 'Empresa',
-            'data_pagamento': 'Data',
-            'valor_in': 'Transações Recebidas Cash-In',
-            'qtd_in': 'Qtd de Transações Cash-In',
-            'taxa_in': 'Taxa Total Cash-In',
-            'menos_taxa_in': 'Total Menos Taxa Cash-In',
-            'ticket_medio_in': 'Ticket Médio Cash-In',
-            'valor_out': 'Transações Recebidas Cash-Out',
-            'qtd_out': 'Qtd de Transações Cash-Out',
-            'taxa_out': 'Taxa Total Cash-Out',
-            'menos_taxa_out': 'Total Mais Taxa Cash-Out',
-            'ticket_medio_out': 'Ticket Médio Cash-Out',
-            'saldo_acumulado': 'Saldo Acumulado'
-        })
-        
-        df_extrato_in = df_extrato_in[['Empresa', 'Data', 'Transações Recebidas Cash-In', 'Qtd de Transações Cash-In', 'Taxa Total Cash-In', 'Total Menos Taxa Cash-In', 'Ticket Médio Cash-In', 'Saldo Acumulado', 'Transações Recebidas Cash-Out', 'Qtd de Transações Cash-Out', 'Taxa Total Cash-Out', 'Total Mais Taxa Cash-Out', 'Ticket Médio Cash-Out']]
-
-        dropdown_options = [{'label': empresa, 'value': empresa} for empresa in df_extrato_in['Empresa'].unique()]
-
-        df_extrato_in['Data'] = pd.to_datetime(df_extrato_in['Data'])
-        mask_in = (df_extrato_in['Data'] >= pd.to_datetime(start_date)) & (df_extrato_in['Data'] <= pd.to_datetime(end_date))
-        df_extrato_in = df_extrato_in.loc[mask_in].sort_values('Data').copy()
-
-
-        df_extrato_in = df_extrato_in.sort_values(by='Data', ascending=False)
-
-        df_extrato_in = df_extrato_in.fillna(0)
-        
-        df_extrato_in['Data'] = df_extrato_in['Data'].dt.strftime('%d/%m/%Y')
-        
-        # Aplicar filtro pelo valor selecionado no dropdown, se houver
-        if selected_empresa:
-            df_extrato_in = df_extrato_in[df_extrato_in['Empresa'] == selected_empresa]
-            df_extrato_in = df_extrato_in.groupby('Data').sum().reset_index()
-            df_extrato_in = df_extrato_in.sort_values(by='Data', ascending=False)
-
-
-        data_combined = []
-        for idx, row in df_extrato_in.iterrows():
-            data_combined.extend([
-                {'Descrição': 'Empresa:', 'Valor': row['Empresa']},
-                {'Descrição': 'Cash-In:', 'Valor': row['Data']},
-                {'Descrição': 'Recebido Cash-In', 'Valor': '{:,.2f}'.format(row['Transações Recebidas Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Qtd. Cash-In', 'Valor': '{:,.0f}'.format(row['Qtd de Transações Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Taxa Cash-In', 'Valor': '{:,.2f}'.format(row['Taxa Total Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Menos a Taxa Cash-In', 'Valor': '{:,.2f}'.format(row['Total Menos Taxa Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Ticket Médio Cash-In', 'Valor': '{:,.2f}'.format(row['Ticket Médio Cash-In']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Cash-Out:', 'Valor': ''},
-                {'Descrição': 'Pago Cash-Out', 'Valor': '{:,.2f}'.format(row['Transações Recebidas Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Qtd. Cash-Out', 'Valor': '{:,.0f}'.format(row['Qtd de Transações Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Taxa Cash-Out', 'Valor': '{:,.2f}'.format(row['Taxa Total Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Mais a Taxa Cash-Out', 'Valor': '{:,.2f}'.format(row['Total Mais Taxa Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Ticket Médio Cash-Out', 'Valor': '{:,.2f}'.format(row['Ticket Médio Cash-Out']).replace(',', '|').replace('.', ',').replace('|', '.')},
-                {'Descrição': 'Saldo Acumulado', 'Valor': '{:,.2f}'.format(row['Saldo Acumulado']).replace(',', '|').replace('.', ',').replace('|', '.'), 'id': 'saldo-acumulado'},
-                {'Descrição': '--------------------', 'Valor': '----------'}
-            ])
-
-        table_combined = dash_table.DataTable(
-            id='table-combined',
-            columns=[{"name": i, "id": i} for i in ['Descrição', 'Valor']],
-            data=data_combined,
-            style_table={'overflowX': 'scroll', 'width': '100%', 'margin': 'auto', 'border':'1px solid gray'},
-            style_cell={'textAlign': 'left', 'padding': '5px', 'whiteSpace': 'normal', 'height': 'auto', 'border-top': 'none', 'border-right': 'none'},
-            style_header={'fontWeight': 'bold', 'backgroundColor': 'white', 'color': 'black', 'text-align': 'center', 'border-bottom':'1px solid gray', 'margin-top':'50px'},
-            style_data={'whiteSpace': 'normal', 'height': 'auto', 'color': 'black', 'backgroundColor': 'white'},
-            export_format='csv',
-            style_data_conditional=[
-            {
-                'if': {'column_id': 'Valor'},
-                'textAlign': 'right',
-            },
-            {
-
-                'if': {'column_id': 'Valor', 'filter_query': '{id} eq "saldo-acumulado"'},
-                'color': '#1cb49c',
-                'fontWeight': 'bold'
-            },
-            {
-                'if': {'column_id': 'Descrição', 'filter_query': '{id} eq "saldo-acumulado"'},
-                'color': '#1cb49c',
-                'fontWeight': 'bold'
-            }
-
-        ]
-        )
-
-        return table_combined, dropdown_options, selected_empresa  # Retorne selected_empresa como valor do dropdown
-
-    except Exception as e:
-        print(f"Erro ao obter dados da tabela: {e}")
-        return html.Div(f"Erro ao carregar os dados da tabela: {e}")
-
 
 
 @app.callback(
@@ -1681,7 +1699,7 @@ def update_output(n_clicks, pathname):
         raise PreventUpdate
     return dcc.Location(pathname='/', id='main_layout_redirect')
 
-mode = 'prod'
+mode = 'dev'
 
 if __name__ == '__main__':
     if mode == 'dev':
